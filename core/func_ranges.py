@@ -75,6 +75,14 @@ def _strip_comments_and_strings(text: str) -> str:
             continue
 
         if state == "line_comment":
+            if ch == "\\" and nxt == "\n":
+                out.append(" \n")
+                i += 2
+                continue
+            if ch == "\\" and nxt == "\r" and text[i + 2:i + 3] == "\n":
+                out.append(" \r\n")
+                i += 3
+                continue
             if ch == "\n":
                 out.append("\n")
                 i += 1

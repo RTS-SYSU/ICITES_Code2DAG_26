@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Dict
 
@@ -28,6 +29,15 @@ def run_schedule(*, base_dir: Path, base_name: str, level: str, rule_name: str, 
         dag_json = read_json(dag_json_path)
         segments_json = read_json(segments_json_path)
         timing_json = read_json(timing_json_path)
+        capabilities = segments_json.get("capabilities", {})
+        if isinstance(capabilities, dict) and capabilities.get("scheduler_compatible") is False:
+            reasons = capabilities.get("blocked_reasons", [])
+            raise StageError(f"condition model is not scheduler-compatible in phase 1: {reasons}")
+
+        if algo_name in {"condition_pareto", "condition_union"}:
+            expected = hashlib.sha256(segments_json_path.read_bytes()).hexdigest()
+            if timing_json.get("segments_sha256") != expected:
+                raise StageError("conditional profiles do not match current segments; rerun condition-timing")
 
         algo = get_algo(algo_name)
         schedule_json = algo.compute(dag_json=dag_json, segments_json=segments_json, timing_json=timing_json)

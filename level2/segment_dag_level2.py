@@ -596,6 +596,11 @@ def build_level2_segments_and_dag(
         "thread_entry_functions": sorted(thread_entry_fns),
         "entry_cut_applied": entry_cut_applied,
         "exit_cut_applied": exit_cut_applied,
+        "node_locations": {
+            node: {"function": owner, "line": line}
+            for node, (owner, line) in sorted(node_owner_line.items())
+        },
+        "node_to_segment": dict(sorted(node_to_seg.items())),
         "segments": [
             {
                 "seg_id": s.seg_id,

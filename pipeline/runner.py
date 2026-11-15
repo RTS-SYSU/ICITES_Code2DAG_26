@@ -36,7 +36,14 @@ def _write_rule_outputs(*, base_dir: Path, base_name: str, level: str, rule_name
     try:
         out_root.mkdir(parents=True, exist_ok=True)
 
-        # Current rules produce duplicated struct/sched outputs. Keep one unified view.
+        # Keep the historical filenames as scheduling-view aliases.  Conditional
+        # rules additionally expose a structural view that contains synthetic
+        # control nodes and must not be consumed by ordinary DAG schedulers.
+        write_json(out_root / "segments_struct.json", output.struct_segments)
+        write_json(out_root / "dag_struct.json", output.struct_dag)
+        write_json(out_root / "segments_sched.json", output.sched_segments)
+        write_json(out_root / "dag_sched.json", output.sched_dag)
+
         segments = dict(output.sched_segments or output.struct_segments)
         dag = dict(output.sched_dag or output.struct_dag)
         segments["view"] = "single"
@@ -45,6 +52,9 @@ def _write_rule_outputs(*, base_dir: Path, base_name: str, level: str, rule_name
 
         dot_text = dot_renderer(segments, dag)
         _render_dot(dot_text, out_root / "dag_seg.dot", out_root / "dag_seg.png")
+        if output.struct_segments != output.sched_segments or output.struct_dag != output.sched_dag:
+            struct_dot = dot_renderer(output.struct_segments, output.struct_dag)
+            _render_dot(struct_dot, out_root / "dag_struct.dot", out_root / "dag_struct.png")
 
         payload = dict(output.meta)
         payload.update({"status": "success", "level": level, "rule_name": rule_name})
@@ -106,6 +116,7 @@ def run_instrument_stage(
     rule_name: str,
     algo_name: str,
     instrument_mode: str = "auto",
+    segment_trace: bool = False,
 ) -> Dict:
     validate_name(level, "level")
     validate_name(rule_name, "rule_name")
@@ -118,11 +129,19 @@ def run_instrument_stage(
         rule_name=rule_name,
         algo_name=algo_name,
         instrument_mode=instrument_mode,
+        segment_trace=segment_trace,
     )
 
 
 def default_rule_for_level(level: str) -> Optional[str]:
+    preferred = {
+        "level1": "stage1_create_join",
+        "level2": "effective_line_merge",
+        "level3": "placeholder_level3",
+    }.get(level)
     rules = list_rules(level)
     if not rules:
         return None
+    if preferred in rules:
+        return preferred
     return sorted(rules.keys())[0]

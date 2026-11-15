@@ -67,8 +67,9 @@ def _compile_project(project_dir: Path) -> Tuple[int, str, str]:
         *sources,
         "-Wl,--wrap=main",
         "-lm",
-        "-ldl",
     ]
+    if os.name != "nt":
+        cmd.append("-ldl")
     proc = subprocess.run(cmd, cwd=str(project_dir), capture_output=True, text=True)
     return proc.returncode, proc.stdout, proc.stderr
 
@@ -119,7 +120,7 @@ def _summarize(rows: List[Tuple[str, int]]) -> Dict[str, Dict]:
     return out
 
 
-def run_timing(*, base_dir: Path, base_name: str, level: str, rule_name: str, repeats: Optional[int] = None) -> Dict:
+def run_timing(*, base_dir: Path, base_name: str, level: str, rule_name: str, repeats: Optional[int] = None, environment: Optional[Dict[str, Optional[str]]] = None, cpu_affinity: Optional[Set[int]] = None) -> Dict:
     pipeline_root = base_dir / "intermediate_results" / base_name / "pipeline"
     out_root = pipeline_root / "timing" / level / rule_name
     meta_path = out_root / "timing_meta.json"
@@ -141,6 +142,14 @@ def run_timing(*, base_dir: Path, base_name: str, level: str, rule_name: str, re
             raise StageError(f"missing dag file: {dag_json_path}")
         if not source_file.exists():
             raise StageError(f"missing source file: {source_file}")
+
+        segments_payload = read_json(segments_json_path)
+        capabilities = segments_payload.get("capabilities", {})
+        if isinstance(capabilities, dict) and capabilities.get("timing_compatible") is False:
+            raise StageError("analysis-only DAG: import existing member timing with Code2DAG.pipeline.lock_timing; C timing disabled")
+        if isinstance(capabilities, dict) and capabilities.get("scheduler_compatible") is False:
+            reasons = capabilities.get("blocked_reasons", [])
+            raise StageError(f"condition model is not timing-compatible in phase 1: {reasons}")
 
         logs_dir = out_root / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
@@ -178,6 +187,11 @@ def run_timing(*, base_dir: Path, base_name: str, level: str, rule_name: str, re
         trace_dir = project_dir / "trace"
         trace_dir.mkdir(parents=True, exist_ok=True)
         env = dict(os.environ)
+        for key, value in (environment or {}).items():
+            if value is None:
+                env.pop(key, None)
+            else:
+                env[key] = value
         # Optional override to keep timing runs bounded for heavy benchmarks.
         # The instrumented program may respect WORK_SCALE; leaving it unset preserves original behavior.
         ws = env.get("MYCALLY_PIPELINE_WORK_SCALE")
@@ -188,7 +202,8 @@ def run_timing(*, base_dir: Path, base_name: str, level: str, rule_name: str, re
         for run_idx in range(1, timing_repeats + 1):
             for old_trace in trace_dir.glob("trace.*.csv"):
                 old_trace.unlink()
-            proc = subprocess.run([str(project_dir / "app")], cwd=str(project_dir), capture_output=True, text=True, env=env)
+            proc = subprocess.run([str(project_dir / "app")], cwd=str(project_dir), capture_output=True, text=True, env=env,
+                                  preexec_fn=(lambda: os.sched_setaffinity(0, set(cpu_affinity))) if cpu_affinity is not None else None)
             run_suffix = f"{run_idx:02d}"
             (logs_dir / f"run.{run_suffix}.stdout.log").write_text(proc.stdout or "", encoding="utf-8")
             (logs_dir / f"run.{run_suffix}.stderr.log").write_text(proc.stderr or "", encoding="utf-8")
