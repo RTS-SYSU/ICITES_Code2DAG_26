@@ -81,6 +81,27 @@ class CompositionC5dTests(unittest.TestCase):
             self.assertFalse(any((e['src']==peer and e['dst'] in target_ids) or (e['dst']==peer and e['src'] in target_ids) for e in d['edges']))
             self.assertEqual(before,source.read_bytes())
 
+    def test_lock_path_candidate_avg_ns_semantics_with_unequal_member_counts(self):
+        item=self.built('l1_many');src=item['source'];before=src.read_bytes();s=item['segments']
+        cand=next(r for r in s['segments'] if r['kind']=='lock_path_candidate' and len(r['member_template_ids'])>=2)
+        weights={t['template_id']:dict(total_ns=10,count=1,avg_ns=10,min_ns=10,max_ns=10) for t in s['templates']}
+        for i,tid in enumerate(cand['member_template_ids']):
+            count=i+1;avg=100+i;total=avg*count
+            weights[tid]=dict(total_ns=total,count=count,avg_ns=avg,min_ns=avg-1,max_ns=avg+1)
+        inp=self._root/'l1_many-semantics.json';inp.write_text(json.dumps({'weights':weights}))
+        timing=import_loop_lock_condition_timing(base_dir=item['base'],base_name='l1_many',input_timing=inp)
+        meta=timing['lock_aggregation']
+        self.assertEqual('fieldwise_sum_of_member_templates',meta['method'])
+        self.assertIn('sum of member means, not total_ns divided by count',meta['avg_ns_semantics'])
+        self.assertIn('cannot be derived from the candidate total_ns/count',meta['avg_ns_semantics'])
+        self.assertEqual(s['source_sha256'],meta['source_sha256'])
+        weight=timing['weights'][cand['seg_id']]
+        self.assertEqual(sum(weights[t]['count'] for t in cand['member_template_ids']),weight['count'])
+        self.assertEqual(sum(weights[t]['total_ns'] for t in cand['member_template_ids']),weight['total_ns'])
+        self.assertEqual(sum(weights[t]['avg_ns'] for t in cand['member_template_ids']),weight['avg_ns'])
+        self.assertNotEqual(weight['avg_ns'],weight['total_ns']//weight['count'])
+        self.assertEqual(before,src.read_bytes())
+
     def test_timing_path_sums_five_algorithms_and_runtime(self):
         for name,modes in EXPECTED.items():
             with self.subTest(name=name):

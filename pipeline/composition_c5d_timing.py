@@ -68,7 +68,13 @@ def import_loop_lock_condition_timing(*,base_dir,base_name,input_timing):
     blob=json.dumps(result)
     for bad in ('wait_ns','blocking_ns','blocking','wcet_ns','wcet'):
         require(bad not in blob,'C5d timing must not publish '+bad)
-    out=dict(base_name=base_name,rule_name=RULE,view='sched',weights=result,timing_origin='explicit published component templates; path-local candidate sums; not measured time, waiting, blocking or WCET',input_timing_sha256=hashlib.sha256(Path(input_timing).read_bytes()).hexdigest(),segments_sha256=hashlib.sha256((blocks/'segments.json').read_bytes()).hexdigest())
+    out=dict(base_name=base_name,rule_name=RULE,view='sched',weights=result,timing_origin='explicit published component templates; path-local candidate sums; not measured time, waiting, blocking or WCET',
+                lock_aggregation=dict(method='fieldwise_sum_of_member_templates',
+                                      count_semantics='sum of member template counts; not a path sample count when member counts differ',
+                                      avg_ns_semantics='sum of member means, not total_ns divided by count; avg_ns cannot be derived from the candidate total_ns/count when member counts differ',
+                                      min_max_semantics='sums of member extrema, not measured path extrema or proven WCET',
+                                      source_sha256=s['source_sha256']),
+                input_timing_sha256=hashlib.sha256(Path(input_timing).read_bytes()).hexdigest(),segments_sha256=hashlib.sha256((blocks/'segments.json').read_bytes()).hexdigest())
     write_json(root/'timing/level2'/RULE/'timing.json',out);return out
 
 
