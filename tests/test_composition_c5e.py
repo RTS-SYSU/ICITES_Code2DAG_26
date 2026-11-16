@@ -62,6 +62,40 @@ class CompositionC5eTests(unittest.TestCase):
                     if tid not in mapping:continue
                     if loop['iteration_count']==0:self.assertEqual([],mapping[tid])
                     else:self.assertTrue(mapping[tid]);self.assertTrue(all(rows[t]['loop_id']==loop['loop_id'] for t in mapping[tid]))
+    def test_target_and_external_same_mutex_ids_and_mappings(self):
+        item=self.cache['external_same_mutex'];source=item['source'];before=source.read_bytes()
+        s=item['segments'];st=item['struct'];d=item['dag'];sd=item['dag_struct']
+        groups=s['lock_groups'];ids=[g['group_id'] for g in groups]
+        self.assertEqual(len(ids),len(set(ids)))
+        target=[g for g in groups if g.get('candidate_segment_ids')]
+        external=[g for g in groups if g.get('member_segment_ids') and not g.get('candidate_segment_ids')]
+        self.assertEqual(1,len(target));self.assertEqual(1,len(external))
+        self.assertEqual('m1',target[0]['mutex_id']);self.assertEqual('m1',external[0]['mutex_id'])
+        self.assertNotEqual(target[0]['group_id'],external[0]['group_id'])
+        target_key=target[0]['members'][0]['function']+'@'+str(target[0]['members'][0]['lock_range'][0])
+        external_key=external[0]['members'][0]['function']+'@'+str(external[0]['members'][0]['lock_range'][0])
+        smap=s['mappings']['source_lock_region_to_group']
+        self.assertEqual([target[0]['group_id']],smap[target_key])
+        self.assertEqual([external[0]['group_id']],smap[external_key])
+        gmap=s['mappings']['grouped_node_to_member_segments']
+        self.assertEqual(target[0]['candidate_segment_ids'],gmap[target[0]['group_id']])
+        self.assertEqual(external[0]['member_segment_ids'],gmap[external[0]['group_id']])
+        dnodes=set(d['nodes']);gids={g['group_id'] for g in groups}
+        self.assertTrue(set(gmap[target[0]['group_id']])<=dnodes)
+        self.assertTrue(set(gmap[external[0]['group_id']])<={m['member_segment_id'] for m in external[0]['members']})
+        for values in smap.values():self.assertTrue(set(values)<=gids)
+        for values in s['mappings']['source_position_to_execution_segments'].values():self.assertTrue(set(values)<=dnodes)
+        for graph in (d,sd):
+            self.assertEqual(len(graph['nodes']),len(set(graph['nodes'])))
+            topo_sort(graph['nodes'],[(e['src'],e['dst']) for e in graph['edges']])
+        target_ids=set(target[0]['candidate_segment_ids']);external_ids=set(external[0]['member_segment_ids'])
+        self.assertFalse(any((e['src'] in target_ids and e['dst'] in external_ids) or (e['src'] in external_ids and e['dst'] in target_ids) for e in d['edges']))
+        self.assertEqual(before,source.read_bytes())
+        binary=self._root/'external_same_mutex-prog'
+        self.h.command(['gcc-13','-pthread','-std=c11',source,'-o',binary])
+        self.assertEqual('RESULT:1118\n',self.h.command([binary]).stdout)
+        self.assertEqual('RESULT:1135\n',self.h.command([binary,'x']).stdout)
+
     def test_timing_path_sums_five_algorithms_and_native_c(self):
         for name,item in self.cache.items():
             with self.subTest(name=name):

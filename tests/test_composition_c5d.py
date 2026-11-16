@@ -54,6 +54,33 @@ class CompositionC5dTests(unittest.TestCase):
                     for c in s['source_component_templates']:self.assertEqual([],s['mappings']['template_to_execution_segments'][c['template_id']])
                 if name=='l2':self.assertEqual(5,len(s['iteration_instances']));self.assertEqual(2,len(s['loops']))
                 if name=='l3':self.assertEqual(6,len(s['iteration_instances']));self.assertEqual(2,len(s['loops']))
+    def test_paper_same_mutex_peer_source_provenance(self):
+        source=ROOT/'Code2DAG/tests/fixtures/c5d_paper_same_mutex.c';before=source.read_bytes()
+        self.assertEqual(RULE,select_rule(source.read_text()))
+        with tempfile.TemporaryDirectory() as tmp:
+            base,p=self.h.native(tmp,source);run_composition_blocks(base_dir=base,base_name=source.stem,source_file=source)
+            b=p/'blocks/level2'/RULE
+            s=json.loads((b/'segments_sched.json').read_text());d=json.loads((b/'dag_sched.json').read_text())
+            peer='MU:lock_peer_a#001@25-27';self.assertIn(peer,d['nodes'])
+            row=next(r for r in s['segments'] if r['seg_id']==peer)
+            self.assertEqual((25,27),(row['start_line'],row['end_line']));self.assertEqual('mutex_cs',row['kind'])
+            gen=s['mappings']['generation_node_to_execution_segments']
+            for node in ('lock_peer_a','lock_peer_a/pthread_mutex_lock1','lock_peer_a/burn2','lock_peer_a/pthread_mutex_unlock3'):
+                self.assertEqual([peer],gen[node])
+            self.assertEqual([peer],s['mappings']['original_segment_to_execution_segments'][peer])
+            positions=s['mappings']['source_position_to_execution_segments']
+            for line in (25,26,27):
+                self.assertEqual([peer],positions[f'LOOPSRC:lock_peer_a:line:{line}'])
+            all_targets=[t for values in (gen,positions,s['mappings']['original_segment_to_execution_segments']) for targets in values.values() for t in (targets if isinstance(targets,list) else [targets])]
+            self.assertTrue(set(all_targets)<=set(d['nodes']))
+            self.assertEqual(3,len(s['lock_groups']));self.assertEqual(3,len({g['group_id'] for g in s['lock_groups']}))
+            self.assertEqual(3,len(s['condition_regions']))
+            self.assertEqual(len(d['nodes']),len(set(d['nodes'])))
+            topo_sort(d['nodes'],[(e['src'],e['dst']) for e in d['edges']])
+            target_ids={x for g in s['lock_groups'] for x in (g.get('candidate_segment_ids') or [])}
+            self.assertFalse(any((e['src']==peer and e['dst'] in target_ids) or (e['dst']==peer and e['src'] in target_ids) for e in d['edges']))
+            self.assertEqual(before,source.read_bytes())
+
     def test_timing_path_sums_five_algorithms_and_runtime(self):
         for name,modes in EXPECTED.items():
             with self.subTest(name=name):

@@ -200,6 +200,9 @@ def build_lock_condition_loop_views(*,base_name,source_text,base_segments_json,b
     except Exception as exc:require(False,'C5e inner Condition/Loop rejected: '+str(exc))
     require(meta['scheduler_compatible'],'C5e incompatible Condition/Loop view')
     target_of={};critical_ids=set();projection={};candidates=[];target_groups=[];group_by_target={}
+    external_groups=copy.deepcopy(s.get('lock_groups',[]))
+    external_ids={group['group_id'] for group in external_groups}
+    target_candidate_lists=[]
     multiple=len(target_locks)>1 or len({lock['mutex_id'] for lock in target_locks})>1
     for index,(lock,conds,selected) in enumerate(targets):
         gid='LOCKGROUP:'+lock['mutex_id']+('@'+lock['function']+':'+str(lock['lock_range'][0]) if multiple else '')
@@ -207,9 +210,29 @@ def build_lock_condition_loop_views(*,base_name,source_text,base_segments_json,b
         critical=[r for r in s['segments'] if r.get('function')==lock['function'] and lock['lock_range'][0]<=r['start_line'] and r['end_line']<=lock['unlock_range'][0] and r['kind'] not in CONTROL and r['kind']!='lock_group']
         require(critical,'C5e missing critical execution rows')
         for row in critical:target_of[row['seg_id']]=index;critical_ids.add(row['seg_id'])
-        c,pr=_build_candidates(lock,conds,s,dd,{r['seg_id'] for r in critical},gid);candidates.extend(c)
+        c,pr=_build_candidates(lock,conds,s,dd,{r['seg_id'] for r in critical},gid);candidates.extend(c);target_candidate_lists.append(c)
         for key,values in pr.items():projection.setdefault(key,[]).extend(values)
         target_groups.append(dict(group_id=gid,mutex_id=lock['mutex_id'],members=[copy.deepcopy(lock)],candidate_segment_ids=[x['seg_id'] for x in c],loop_id=None))
+    # A target Lock and an external peer Lock can share the same mutex.  Both
+    # source regions must stay addressable, but the scheduling DAG uses the
+    # external group id as a node id, so duplicate ids are not allowed.  Keep
+    # the old output for non-conflicting inputs and add only a deterministic
+    # source-location suffix to the target group when an external id collides.
+    renamed_groups={}
+    used_group_ids=set(external_ids)|{group['group_id'] for group in target_groups}
+    for index,group in enumerate(target_groups):
+        old=group['group_id']
+        if old not in external_ids:continue
+        lock=target_locks[index]
+        base='LOCKGROUP:'+lock['mutex_id']+'@'+lock['function']+':'+str(lock['lock_range'][0])
+        new=base;serial=2
+        while new in used_group_ids:
+            new=base+'#'+str(serial);serial+=1
+        used_group_ids.add(new);group['group_id']=new;group_by_target[index]=new
+        for candidate in target_candidate_lists[index]:
+            candidate['lock_group_id']=new
+            if isinstance(candidate.get('lock_group'),dict):candidate['lock_group']['group_id']=new
+        renamed_groups[old]=new
     absorbed=[]
     if raw_sem_edges:
         posts=[c for c in sem_calls if c['name']=='sem_post'];waits=[c for c in sem_calls if c['name']=='sem_wait']
@@ -271,10 +294,19 @@ def build_lock_condition_loop_views(*,base_name,source_text,base_segments_json,b
             final_dag=dict(nodes=[r['seg_id'] for r in final],edges=_project(st2['segments'],sd2),exclusive_groups=copy.deepcopy(sd2.get('exclusive_groups',{})))
             loops.extend(copy.deepcopy(st2.get('loops',[])));ext_templates.extend(copy.deepcopy(st2.get('templates',[])))
     mappings=copy.deepcopy(s.get('mappings',{}))
-    grouped=dict(mappings.get('grouped_node_to_member_segments',{}));source_lock=dict(mappings.get('source_lock_region_to_group',{}));source_inst=dict(mappings.get('source_lock_region_to_instances',{}))
+    base_grouped=dict(mappings.get('grouped_node_to_member_segments',{}))
+    if renamed_groups:
+        for group in external_groups:base_grouped.setdefault(group['group_id'],_ordered_unique(group.get('member_segment_ids') or group.get('candidate_segment_ids') or []))
+    grouped=dict(base_grouped);source_lock=dict(mappings.get('source_lock_region_to_group',{}));source_inst=dict(mappings.get('source_lock_region_to_instances',{}))
     for index,group in enumerate(target_groups):grouped[group['group_id']]=group['candidate_segment_ids']
     for lock,group in zip(target_locks,target_groups):
         key=lock['function']+'@'+str(lock['lock_range'][0]);source_lock[key]=[group['group_id']];source_inst[key]=[group['group_id']]
+    if renamed_groups:
+        for group in external_groups:
+            for member in group.get('members',[]):
+                function=member.get('function');lock_range=member.get('lock_range') or []
+                if function and lock_range:
+                    key=function+'@'+str(lock_range[0]);source_lock.setdefault(key,[group['group_id']]);source_inst.setdefault(key,[group['group_id']])
     iteration=dict(mappings.get('iteration_to_group',{}))
     for row in s['segments']:
         if row.get('role')=='iteration' and row['seg_id'] in projection:
@@ -354,7 +386,7 @@ def build_lock_condition_loop_views(*,base_name,source_text,base_segments_json,b
         s['condition_regions']=sorted(copy.deepcopy(s.get('condition_regions',[]))+helper_conditions,key=lambda r:(r['function'],r['entry_line'],r['exit_line'],r['condition_id']))
         mappings['source_only_segment_to_structural_nodes']={k:_ordered_unique(v) for k,v in sorted(helper_segment_to_struct.items())}
         mappings['source_position_to_structural_nodes']={k:_ordered_unique(v) for k,v in sorted(helper_position_to_struct.items())}
-    external_groups=copy.deepcopy(s.get('lock_groups',[]));lock_groups=target_groups+external_groups;external_locks=[]
+    lock_groups=target_groups+external_groups;external_locks=[]
     for item in external_groups:external_locks.extend(copy.deepcopy(item.get('members',[])))
     common=dict(base_name=base_name,rule_name=RULE,level='level2',source_file=raw['source_file'],source_sha256=hashlib.sha256(source_text.encode()).hexdigest(),
                 thread_entry_functions=copy.deepcopy(raw.get('thread_entry_functions',[])),loops=loops,condition_regions=copy.deepcopy(s.get('condition_regions',[])),

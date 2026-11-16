@@ -609,6 +609,25 @@ def _clone_body_iteration(loop_meta,body_st,body_sd,body_s,body_dd,fields,scope)
                 cid=cid,tmap=tmap,struct_map=smap,loop_id=loop_meta['loop_id'])
 
 
+def _fill_external_mutex_provenance(rows,raw,bases,lines):
+    """Keep source provenance for an unchanged external mutex_cs row.
+
+    A peer Lock outside the Loop/Condition body reaches the final rows without
+    the source fields that body rows get.  Fill only rows that still carry an
+    original raw segment id and have no provenance yet; target/Loop rows are
+    namespaced and are left untouched.
+    """
+    rawids={base['seg_id'] for base in bases};node_to_segment=raw.get('node_to_segment',{})
+    for row in rows:
+        if row.get('kind')!='mutex_cs' or row.get('source_position_ids'):continue
+        seg=row.get('seg_id');fn=row.get('function');a=row.get('start_line');b=row.get('end_line')
+        if seg not in rawids or not fn or a is None or b is None:continue
+        row['source_segments']=[seg]
+        row['source_position_ids']=['LOOPSRC:'+fn+':line:'+str(n) for n in range(a,b+1) if lines[n-1].strip() and lines[n-1].strip() not in ('{','}')]
+        origin=[n for n,sid in node_to_segment.items() if sid==seg and not is_ignored_compiler_fn(n)]
+        if origin:row['generation_origin']=origin
+
+
 def build_loop_condition_views(*,base_name,source_text,base_segments_json,base_dag_json):
     raw=copy.deepcopy(base_segments_json);dag=copy.deepcopy(base_dag_json);bases=raw['segments'];rawids={r['seg_id']:r for r in bases}
     require(len(rawids)==len(bases) and set(rawids)==set(dag['nodes']),'C5d invalid raw IDs')
@@ -736,6 +755,8 @@ def build_loop_condition_views(*,base_name,source_text,base_segments_json,base_d
             seen_src.add(sid)
             source_component_templates.append(dict(template_id=sid,loop_id=lid,function=t.get('function'),role='condition_component_source',analysis_only=True,start_line=t.get('start_line'),end_line=t.get('end_line')))
             component_targets.setdefault(sid,[])
+    _fill_external_mutex_provenance(sched_rows,raw,bases,lines)
+    _fill_external_mutex_provenance(struct_rows,raw,bases,lines)
     for edge in top_sd['edges']:
         srcs=replacement.get(edge['src'],([edge['src']],[edge['src']]))[1] if edge['src'] in replacement else [edge['src']]
         dsts=replacement.get(edge['dst'],([edge['dst']],[edge['dst']]))[0] if edge['dst'] in replacement else [edge['dst']]
