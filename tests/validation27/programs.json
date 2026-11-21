@@ -1,0 +1,483 @@
+{
+  "programs": [
+    {
+      "name": "cond_c1",
+      "file": "cond_c1.c",
+      "rule": "conditional_branches",
+      "conditions": [
+        {
+          "label": "C1",
+          "branches": [
+            "then",
+            "else"
+          ]
+        }
+      ],
+      "loops": []
+    },
+    {
+      "name": "cond_c2",
+      "file": "cond_c2.c",
+      "rule": "conditional_branches",
+      "conditions": [
+        {
+          "label": "C2:outer",
+          "branches": [
+            "then",
+            "else"
+          ]
+        },
+        {
+          "label": "C2:inner",
+          "branches": [
+            "then",
+            "else"
+          ]
+        }
+      ],
+      "loops": []
+    },
+    {
+      "name": "cond_c3",
+      "file": "cond_c3.c",
+      "rule": "conditional_branches",
+      "conditions": [
+        {
+          "label": "C3",
+          "branches": [
+            "a",
+            "b",
+            "c"
+          ]
+        }
+      ],
+      "loops": []
+    },
+    {
+      "name": "cond_c4",
+      "file": "cond_c4.c",
+      "rule": "conditional_branches",
+      "conditions": [
+        {
+          "label": "C4",
+          "branches": [
+            "then"
+          ]
+        }
+      ],
+      "loops": []
+    },
+    {
+      "name": "lock_l1",
+      "file": "lock_l1.c",
+      "rule": "lock_grouped",
+      "conditions": [],
+      "loops": []
+    },
+    {
+      "name": "lock_l2",
+      "file": "lock_l2.c",
+      "rule": "lock_grouped",
+      "conditions": [],
+      "loops": []
+    },
+    {
+      "name": "loop_l1",
+      "file": "loop_l1.c",
+      "rule": "loop_static_nested",
+      "conditions": [],
+      "loops": [
+        {
+          "label": "L1",
+          "count": 3,
+          "dim": 1
+        }
+      ]
+    },
+    {
+      "name": "loop_l1_n0",
+      "file": "loop_l1_n0.c",
+      "rule": "loop_static_nested",
+      "conditions": [],
+      "loops": [
+        {
+          "label": "L1",
+          "count": 0,
+          "dim": 1
+        }
+      ]
+    },
+    {
+      "name": "loop_l1_n1",
+      "file": "loop_l1_n1.c",
+      "rule": "loop_static_nested",
+      "conditions": [],
+      "loops": [
+        {
+          "label": "L1",
+          "count": 1,
+          "dim": 1
+        }
+      ]
+    },
+    {
+      "name": "loop_l1_n3",
+      "file": "loop_l1_n3.c",
+      "rule": "loop_static_nested",
+      "conditions": [],
+      "loops": [
+        {
+          "label": "L1",
+          "count": 3,
+          "dim": 1
+        }
+      ]
+    },
+    {
+      "name": "loop_l2",
+      "file": "loop_l2.c",
+      "rule": "loop_static_nested",
+      "conditions": [],
+      "loops": [
+        {
+          "label": "L2a",
+          "count": 2,
+          "dim": 1
+        },
+        {
+          "label": "L2b",
+          "count": 2,
+          "dim": 1
+        }
+      ]
+    },
+    {
+      "name": "loop_l3",
+      "file": "loop_l3.c",
+      "rule": "loop_static_nested",
+      "conditions": [],
+      "loops": [
+        {
+          "label": "L3o",
+          "count": 2,
+          "dim": 2
+        },
+        {
+          "label": "L3i",
+          "count": 3,
+          "dim": 2
+        }
+      ]
+    },
+    {
+      "name": "loop_l3_zero",
+      "file": "loop_l3_zero.c",
+      "rule": "loop_static_nested",
+      "conditions": [],
+      "loops": [
+        {
+          "label": "L3z",
+          "count": 0,
+          "dim": 2
+        },
+        {
+          "label": "L3z",
+          "count": 3,
+          "dim": 2
+        }
+      ]
+    },
+    {
+      "name": "pair_cond_lock",
+      "file": "pair_cond_lock.c",
+      "rule": "composition_c2a",
+      "conditions": [
+        {
+          "label": "P2a",
+          "branches": [
+            "then",
+            "else"
+          ]
+        }
+      ],
+      "loops": []
+    },
+    {
+      "name": "pair_lock_cond",
+      "file": "pair_lock_cond.c",
+      "rule": "composition_c2b",
+      "conditions": [
+        {
+          "label": "P2b",
+          "branches": [
+            "then",
+            "else"
+          ]
+        }
+      ],
+      "loops": []
+    },
+    {
+      "name": "pair_cond_loop",
+      "file": "pair_cond_loop.c",
+      "rule": "composition_c3a",
+      "conditions": [
+        {
+          "label": "P3a",
+          "branches": [
+            "then",
+            "else"
+          ]
+        }
+      ],
+      "loops": [
+        {
+          "label": "P3a",
+          "count": 3,
+          "dim": 1
+        }
+      ]
+    },
+    {
+      "name": "pair_loop_cond",
+      "file": "pair_loop_cond.c",
+      "rule": "composition_c3b",
+      "conditions": [
+        {
+          "label": "P3b",
+          "branches": [
+            "then",
+            "else"
+          ]
+        }
+      ],
+      "loops": [
+        {
+          "label": "P3b",
+          "count": 3,
+          "dim": 1
+        }
+      ]
+    },
+    {
+      "name": "pair_loop_lock",
+      "file": "pair_loop_lock.c",
+      "rule": "composition_c4a",
+      "conditions": [],
+      "loops": [
+        {
+          "label": "P4a",
+          "count": 3,
+          "dim": 1
+        }
+      ]
+    },
+    {
+      "name": "pair_lock_loop",
+      "file": "pair_lock_loop.c",
+      "rule": "composition_c4b",
+      "conditions": [],
+      "loops": [
+        {
+          "label": "P4b",
+          "count": 3,
+          "dim": 1
+        }
+      ]
+    },
+    {
+      "name": "c5a",
+      "file": "c5a.c",
+      "rule": "composition_c5a",
+      "conditions": [
+        {
+          "label": "C5A",
+          "branches": [
+            "then",
+            "else"
+          ]
+        }
+      ],
+      "loops": [
+        {
+          "label": "C5A",
+          "count": 0,
+          "dim": 1
+        }
+      ]
+    },
+    {
+      "name": "c5b",
+      "file": "c5b.c",
+      "rule": "composition_c5b",
+      "conditions": [
+        {
+          "label": "C5B",
+          "branches": [
+            "then",
+            "else"
+          ]
+        }
+      ],
+      "loops": [
+        {
+          "label": "C5B",
+          "count": 3,
+          "dim": 1
+        }
+      ]
+    },
+    {
+      "name": "c5c",
+      "file": "c5c.c",
+      "rule": "composition_c5c",
+      "conditions": [
+        {
+          "label": "C5C",
+          "branches": [
+            "then",
+            "else"
+          ]
+        }
+      ],
+      "loops": [
+        {
+          "label": "C5C",
+          "count": 1,
+          "dim": 1
+        }
+      ]
+    },
+    {
+      "name": "c5d",
+      "file": "c5d.c",
+      "rule": "composition_c5d",
+      "conditions": [
+        {
+          "label": "C5D",
+          "branches": [
+            "then",
+            "else"
+          ]
+        }
+      ],
+      "loops": [
+        {
+          "label": "C5D",
+          "count": 1,
+          "dim": 1
+        }
+      ]
+    },
+    {
+      "name": "c5e",
+      "file": "c5e.c",
+      "rule": "composition_c5e",
+      "conditions": [
+        {
+          "label": "C5E",
+          "branches": [
+            "then",
+            "else"
+          ]
+        }
+      ],
+      "loops": [
+        {
+          "label": "C5E",
+          "count": 3,
+          "dim": 1
+        }
+      ]
+    },
+    {
+      "name": "c5f",
+      "file": "c5f.c",
+      "rule": "composition_c5f",
+      "conditions": [
+        {
+          "label": "C5F",
+          "branches": [
+            "then",
+            "else"
+          ]
+        }
+      ],
+      "loops": [
+        {
+          "label": "C5F",
+          "count": 3,
+          "dim": 1
+        }
+      ]
+    },
+    {
+      "name": "c5f_external",
+      "file": "c5f_external.c",
+      "rule": "composition_c5f",
+      "conditions": [
+        {
+          "label": "EXT:target",
+          "branches": [
+            "then",
+            "else"
+          ]
+        },
+        {
+          "label": "EXT:cond",
+          "branches": [
+            "then",
+            "else"
+          ]
+        }
+      ],
+      "loops": [
+        {
+          "label": "EXT:target",
+          "count": 3,
+          "dim": 1
+        }
+      ]
+    },
+    {
+      "name": "coexist",
+      "file": "coexist.c",
+      "rule": "composition_c5f",
+      "conditions": [
+        {
+          "label": "CO:target",
+          "branches": [
+            "then",
+            "else"
+          ]
+        },
+        {
+          "label": "CO:cond",
+          "branches": [
+            "then",
+            "else"
+          ]
+        },
+        {
+          "label": "CO:helper",
+          "branches": [
+            "then",
+            "else"
+          ]
+        }
+      ],
+      "loops": [
+        {
+          "label": "CO:target",
+          "count": 3,
+          "dim": 1
+        },
+        {
+          "label": "CO:loop",
+          "count": 2,
+          "dim": 1
+        }
+      ]
+    }
+  ]
+}
