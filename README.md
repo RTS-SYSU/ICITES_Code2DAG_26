@@ -461,15 +461,16 @@ The current extended-DAG paper table reports:
 
 Configuration and data provenance:
 
-- G1–G4, each at 2-core and 4-core, 100 blocks per path; G1/G2/G4 use the
-  frozen two-path weights, G3 uses its native 16-path probabilities;
+- G1–G4, each at 2-core and 4-core, 100 blocks per path; G1/G2 use
+  two-path weights, while G3/G4 use their native 16-path probabilities;
 - G3 uses the **same-program 6-task** version for both core counts (the older
   4-task G3_2c is historical and is not mixed into this table);
 - reference machine: original i5-12600K, Linux
   `6.1.192-0601192-generic`, CFS/SCHED_OTHER;
-- source batches: the unified work2 100-block formal batch for G1/G2/G4 and the
-  G3 same-program 100-block update for G3; the aggregate is the current
-  same-program G3 eight-config table;
+- source batches: the unified work2 100-block formal batch for G1/G2,
+  the same-program 100-block batch for G3, and the independent 100-block
+  batch after semantic repair for G4; the aggregate is the eight-configuration
+  table reported in the paper;
 - the full schedule executor (not this repository) produced the runtime
   measurements. Raw 100-block records are not published in this repository.
 
