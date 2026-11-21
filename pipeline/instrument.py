@@ -74,21 +74,31 @@ instrumented_source :Path ,
     original_dag_dot =base_dir /"intermediate_results"/base_name /"level2"/"merge_post_wait"/"dag_level2_sem.dot"
     original_dag_png =base_dir /"intermediate_results"/base_name /"dag_generation"/"dag.png"
     block_dag =base_dir /"intermediate_results"/base_name /"pipeline"/"blocks"/level /rule_name /"dag_seg.png"
+    block_dag_dot =block_dag .with_suffix (".dot")
     published_source =source_dir /instrumented_source .name
 
     if not original_dag_dot .exists ()and not original_dag_png .exists ():
         raise StageError (f"missing original DAG source: {original_dag_dot}")
-    if not block_dag .exists ():
-        raise StageError (f"missing block DAG png: {block_dag}")
+    if not block_dag .exists ()and not block_dag_dot .exists ():
+        raise StageError (f"missing block DAG artifact: {block_dag} or {block_dag_dot}")
     if not instrumented_source .exists ():
         raise StageError (f"missing instrumented source: {instrumented_source}")
 
     published_original_dag =graphs_dir /"original_dag.png"
     if original_dag_dot .exists ():
-        _render_round_node_dot_to_png (original_dag_dot ,published_original_dag )
+        try :
+            _render_round_node_dot_to_png (original_dag_dot ,published_original_dag )
+        except StageError :
+            published_original_dag =graphs_dir /"original_dag.dot"
+            shutil .copy2 (original_dag_dot ,published_original_dag )
     else :
         shutil .copy2 (original_dag_png ,published_original_dag )
-    shutil .copy2 (block_dag ,graphs_dir /"block_dag.png")
+    if block_dag .exists ():
+        published_block_dag =graphs_dir /"block_dag.png"
+        shutil .copy2 (block_dag ,published_block_dag )
+    else :
+        published_block_dag =graphs_dir /"block_dag.dot"
+        shutil .copy2 (block_dag_dot ,published_block_dag )
     shutil .copy2 (instrumented_source ,published_source )
 
     write_json (
@@ -103,12 +113,12 @@ instrumented_source :Path ,
     "results_root":str (results_root ),
     "artifacts":{
     "original_dag":str (published_original_dag ),
-    "block_dag":str (graphs_dir /"block_dag.png"),
+    "block_dag":str (published_block_dag ),
     "instrumented_source":str (published_source ),
     },
     "inputs":{
     "original_dag":str (original_dag_dot if original_dag_dot .exists ()else original_dag_png ),
-    "block_dag":str (block_dag ),
+    "block_dag":str (block_dag if block_dag .exists ()else block_dag_dot ),
     "instrumented_source":str (instrumented_source ),
     },
     },
@@ -124,6 +134,7 @@ level :str ,
 rule_name :str ,
 algo_name :str ,
 instrument_mode :str ="auto",
+segment_trace :bool =False,
 )->Dict :
     pipeline_root =base_dir /"intermediate_results"/base_name /"pipeline"
     instrument_root =pipeline_root /"instrument"/level /rule_name 
@@ -162,6 +173,14 @@ instrument_mode :str ="auto",
         if not schedule_json_path .exists ():
             raise StageError (f"missing schedule file: {schedule_json_path}")
 
+        segments_payload =read_json (segments_json_path )
+        capabilities =segments_payload .get ("capabilities",{})
+        if isinstance(capabilities, dict) and capabilities.get("instrumentation_compatible") is False:
+            raise StageError("analysis-only DAG: C instrumentation and priority writeback disabled")
+        if isinstance (capabilities ,dict )and capabilities .get ("scheduler_compatible")is False :
+            reasons =capabilities .get ("blocked_reasons",[])
+            raise StageError (f"condition model is not instrumentation-compatible in phase 1: {reasons}")
+
         schedule_json =read_json (schedule_json_path )
         priorities =schedule_json .get ("priorities",{})
         if not isinstance (priorities ,dict ):
@@ -181,6 +200,9 @@ instrument_mode :str ="auto",
             raise StageError (f"invalid instrument_mode: {instrument_mode}")
 
         use_specialized =(mode =="specialized")or (mode =="auto"and level =="level1")
+
+        if segment_trace and use_specialized:
+            raise StageError("segment tracing requires generic instrumentation")
 
         if use_specialized :
             warnings =instrument_prio_program_timing_and_segment_priorities (
@@ -213,6 +235,7 @@ instrument_mode :str ="auto",
             segments_json =segments_json_path ,
             priorities =priorities ,
             out_c =tmp_instrumented ,
+            segment_trace=segment_trace,
             )
 
             if not dag_json_path .exists ():
@@ -270,6 +293,20 @@ instrument_mode :str ="auto",
         instrumented_source_path =algo_result_dir /f"{algo_name}.c"
         instrumented_source_path .write_text (instrumented_text ,encoding ="utf-8")
 
+        if segment_trace:
+            mapping = {
+                "contract": "pthread_self priority switch at segment entry; persists until next switch; not independent node threads",
+                "unmodeled_effects": ["priority inheritance on pthread_create", "mutex blocking without a priority-inheritance guarantee", "synchronization inside merged segments", "unmodeled source gaps"],
+                "nodes": [{"seg_id": row["seg_id"], "function": row["function"],
+                           "start_line": row["start_line"], "end_line": row["end_line"],
+                           "priority": priorities[row["seg_id"]],
+                           "condition_memberships": row.get("condition_memberships", [])}
+                          for row in segments_payload["segments"]],
+            }
+            write_json(algo_result_dir / "priority_thread_mapping.json", mapping)
+            for filename in ("condition_runtime.h", "condition_runtime.c"):
+                shutil.copy2(base_dir / "level1" / filename, algo_result_dir / filename)
+
         # CFS control group (pure source file)
         cfs_result_dir =result_root /"CFS"
         cfs_result_dir .mkdir (parents =True ,exist_ok =True )
@@ -282,6 +319,10 @@ instrument_mode :str ="auto",
         (algo_timing_dir /f"{algo_name}.c").write_text (
         _inject_main_timing_text (instrumented_text ),encoding ="utf-8"
         )
+
+        if segment_trace:
+            for filename in ("condition_runtime.h", "condition_runtime.c"):
+                shutil.copy2(base_dir / "level1" / filename, algo_timing_dir / filename)
 
         # CFS timing version
         cfs_timing_dir =timing_root /"CFS"
@@ -300,6 +341,10 @@ instrument_mode :str ="auto",
         instrumented_source =instrumented_source_path ,
         )
 
+        if segment_trace:
+            for filename in ("condition_runtime.h", "condition_runtime.c", "priority_thread_mapping.json"):
+                shutil.copy2(algo_result_dir / filename, published_results_dir / "source" / filename)
+
         payload ={
         "status":"success",
         "base_name":base_name ,
@@ -316,6 +361,10 @@ instrument_mode :str ="auto",
         "timing_dir":str (timing_root ),
         "results_dir":str (published_results_dir ),
         }
+        if segment_trace:
+            payload["runtime_files"] = [str(algo_result_dir / filename) for filename in ("condition_runtime.h", "condition_runtime.c")]
+            payload["required_link_flags"] = ["-Wl,--wrap=main"]
+            payload["priority_thread_mapping"] = str(algo_result_dir / "priority_thread_mapping.json")
         mark_success (meta_path ,step ="instrument",extra ={"priority_count":len (priorities ),"warnings_count":len (warnings )})
         return payload 
     except Exception as exc :

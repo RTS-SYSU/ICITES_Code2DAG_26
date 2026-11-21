@@ -902,10 +902,12 @@ def full_call_graph (functions ,**kwargs ):
                             if count_if ==0 :
                                 count_if =count_if +1 
                                 start_if =pre 
-                            print_buf (std_buf ,'"{}" -> "{}";'.format (pre ,caller ))
+                            if pre !=caller :
+                                print_buf (std_buf ,'"{}" -> "{}";'.format (pre ,caller ))
                             print_buf (std_buf ,'"{}" [style=dashed]'.format (caller ))
                         elif "while"in caller :
-                            print_buf (std_buf ,'"{}" -> "{}";'.format (pre ,caller ))
+                            if pre !=caller :
+                                print_buf (std_buf ,'"{}" -> "{}";'.format (pre ,caller ))
                             print_buf (std_buf ,'"{}" [style=dashed]'.format (caller ))
                         elif "switch"in caller :
                             if count_switch ==0 :
@@ -921,22 +923,27 @@ def full_call_graph (functions ,**kwargs ):
                             switchlist [start_switch ]=dict ()
                             switchlist [start_switch ][search_switch ]=list ()
                             switchlist [start_switch ][search_switch ].append (caller )
-                            print_buf (std_buf ,'"{}" -> "{}";'.format (start_switch ,caller ))
+                            if start_switch !=caller :
+                                print_buf (std_buf ,'"{}" -> "{}";'.format (start_switch ,caller ))
                             print_buf (std_buf ,'"{}" [style=dashed]'.format (caller ))
                         else :
                             if count_if >0 :
                                 count_if =0 
                                 end_if =caller 
-                                print_buf (std_buf ,'"{}" -> "{}";'.format (pre ,end_if ))
-                                print_buf (std_buf ,'"{}" -> "{}";'.format (start_if ,end_if ))
+                                if pre !=end_if :
+                                    print_buf (std_buf ,'"{}" -> "{}";'.format (pre ,end_if ))
+                                if start_if !=end_if :
+                                    print_buf (std_buf ,'"{}" -> "{}";'.format (start_if ,end_if ))
                             elif count_switch >0 :#switch the element connected to the last node
                                 end_switch =caller 
                                 for key in switchlist [start_switch ]:
-                                    print_buf (std_buf ,'"{}" -> "{}";'.format (key [-1 ],end_switch ))
+                                    if key [-1 ]!=end_switch :
+                                        print_buf (std_buf ,'"{}" -> "{}";'.format (key [-1 ],end_switch ))
                                 count_switch =0 
                                 prenum =1 
                             else :
-                                  print_buf (std_buf ,'"{}" -> "{}";'.format (pre ,caller ))
+                                  if pre !=caller :
+                                    print_buf (std_buf ,'"{}" -> "{}";'.format (pre ,caller ))
                     else :
                     # threads-only mode: only handle normal calls, not conditionalnode
                         if pre !=caller :
@@ -1980,6 +1987,8 @@ def main ():
             base_name =base_name .split (".")[0 ]
         out_dir =base_dir /"intermediate_results"/base_name /"dag_generation"
         out_dir .mkdir (parents =True ,exist_ok =True )
+        from .call_sites import collect_call_sites
+        (out_dir /"call_sites.json").write_text(json.dumps(collect_call_sites(config.RTLFILE), ensure_ascii=False, indent=2), encoding="utf-8")
         functions_path =out_dir /"functions_full.json"
         with functions_path .open ("w",encoding ="utf-8")as f :
             json .dump (_serialize_functions_for_dump (functions ),f ,ensure_ascii =False ,indent =2 )

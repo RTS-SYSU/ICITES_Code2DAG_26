@@ -228,7 +228,9 @@ class CircleTxtExporter :
         )
 
         # Prefer extracting the semaphore name from source-code call arguments; use expand `symbol_ref` only as a fallback.
-        var_name =self ._extract_source_arg_name (api_name ,line_num )
+        meta =self .functions .get (func_name ,{}).get ("mycalls_meta",{}).get (call_node ,{})
+        column =meta .get ("col") if meta .get ("line")==line_num else None
+        var_name =self ._extract_source_arg_name (api_name ,line_num ,column )
         if not var_name :
             var_name =self ._extract_variable_name (func_name ,api_name ,call_index )
         if not var_name :
@@ -370,7 +372,7 @@ class CircleTxtExporter :
 
         return None 
 
-    def _extract_source_arg_name (self ,api_name :str ,line_num :Optional [int ])->Optional [str ]:
+    def _extract_source_arg_name (self ,api_name :str ,line_num :Optional [int ],column :Optional [int ]=None )->Optional [str ]:
         """Extract synchronization-primitive variable names from source-code call arguments, e.g. `sem_post(&sem_01) -> sem_01`."""
         if not self .source_file or line_num is None :
             return None 
@@ -382,9 +384,15 @@ class CircleTxtExporter :
             if line_num <1 or line_num >len (source_lines ):
                 return None 
             line =source_lines [line_num -1 ]
-            m =re .search (rf"\b{re.escape(api_name)}\s*\(\s*&?\s*([A-Za-z_]\w*)",line )
-            if m :
-                return m .group (1 )
+            matches =list (re .finditer (rf"\b{re.escape(api_name)}\s*\(\s*&?\s*([A-Za-z_]\w*)",line ))
+            # Several semaphore calls may share a source line. GCC columns
+            # identify the actual call; never silently select the first one.
+            if len (matches )==1 :
+                return matches [0].group (1 )
+            if isinstance (column ,int ):
+                for match in matches :
+                    if match .start ()==column -1 :
+                        return match .group (1 )
         except Exception :
             pass 
 
