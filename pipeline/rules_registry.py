@@ -10,6 +10,7 @@ from .rules.loop_nested_rule import LoopStaticNestedRule
 from .rules.composition_rule import CompositionC1Rule
 from .rules.composition_c2a_rule import CompositionC2aRule
 from .rules.composition_c2b_rule import CompositionC2bRule
+from .rules.composition_c2c_rule import CompositionC2cRule
 from .rules.composition_c3a_rule import CompositionC3aRule
 from .rules.composition_c4a_rule import CompositionC4aRule
 from .rules.composition_c4b_rule import CompositionC4bRule
@@ -33,6 +34,7 @@ RULES_REGISTRY: Dict[str, Dict[str, RulePlugin]] = {
         "composition_c1": CompositionC1Rule(),
         "composition_c2a": CompositionC2aRule(),
         "composition_c2b": CompositionC2bRule(),
+        "composition_c2c": CompositionC2cRule(),
         "composition_c3a": CompositionC3aRule(),
         "composition_c4a": CompositionC4aRule(),
         "composition_c4b": CompositionC4bRule(),

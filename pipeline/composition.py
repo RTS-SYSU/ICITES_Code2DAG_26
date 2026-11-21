@@ -82,6 +82,10 @@ def select_rule(text):
         from .composition_c2b_basic_model import helper_condition_inside_lock
         if helper_condition_inside_lock(text,function_ranges,matched_regions):
             return 'composition_c2b'
+        # Condition and Lock coexist but neither contains the other and there
+        # is no Loop: C2c handles the independent (non-nested) case.
+        if 'loop' not in kinds:
+            return 'composition_c2c'
     return RULE
 
 
