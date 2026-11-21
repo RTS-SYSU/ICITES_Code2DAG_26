@@ -6,10 +6,14 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <sys/syscall.h>
 #include <sys/types.h>
-#include <time.h>
 #include <unistd.h>
+#endif
+#include <time.h>
 
 static __thread uint64_t tls_t0_ns = 0;
 static __thread const char *tls_seg = NULL;
@@ -20,13 +24,25 @@ static char g_out_dir[512] = "./trace";
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 
 static uint64_t now_ns(void) {
+#ifdef _WIN32
+    LARGE_INTEGER frequency;
+    LARGE_INTEGER counter;
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&counter);
+    return (uint64_t)((counter.QuadPart * 1000000000ULL) / frequency.QuadPart);
+#else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+#endif
 }
 
-static pid_t get_tid(void) {
+static unsigned long get_tid(void) {
+#ifdef _WIN32
+    return (unsigned long)GetCurrentThreadId();
+#else
     return (pid_t)syscall(SYS_gettid);
+#endif
 }
 
 static void ensure_dir_once(void) {
@@ -68,12 +84,12 @@ void segtrace_end(const char *seg_id) {
     ensure_thread_file();
     uint64_t t1 = now_ns();
     uint64_t dur = (t1 >= tls_t0_ns) ? (t1 - tls_t0_ns) : 0;
-    pid_t tid = get_tid();
+    unsigned long tid = get_tid();
 
     // Write: tid, seg_id, begin_ns, end_ns, dur_ns
     // seg_id is quoted to keep CSV robust.
-    fprintf(tls_fp, "%d,\"%s\",%llu,%llu,%llu\n",
-            (int)tid,
+    fprintf(tls_fp, "%lu,\"%s\",%llu,%llu,%llu\n",
+            tid,
             seg_id ? seg_id : "",
             (unsigned long long)tls_t0_ns,
             (unsigned long long)t1,

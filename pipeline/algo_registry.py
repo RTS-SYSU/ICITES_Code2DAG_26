@@ -8,6 +8,7 @@ from .algo import TLevelBlockAlgo
 from .algo import WCETFirstBlockAlgo
 from .algo import Zhao2020BlockAlgo
 from .algo.base import AlgoPlugin
+from .algo.conditional import ConditionalPriorityAlgo
 
 ALGO_REGISTRY: Dict[str, AlgoPlugin] = {
     "LPF": CPFBlockAlgo(),
@@ -15,6 +16,8 @@ ALGO_REGISTRY: Dict[str, AlgoPlugin] = {
     "heft": HEFTBlockAlgo(),
     "t_level": TLevelBlockAlgo(),
     "zhao2020": Zhao2020BlockAlgo(),
+    "condition_pareto": ConditionalPriorityAlgo(),
+    "condition_union": ConditionalPriorityAlgo(union_ablation=True),
 }
 
 

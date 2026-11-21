@@ -71,6 +71,32 @@ def main(argv: Optional[list[str]] = None) -> int:
     c_inst.add_argument("--algo", default="LPF")
     c_inst.add_argument("--mode", default="auto", choices=["auto", "specialized", "generic"])
 
+    c_inst.add_argument("--segment-trace", action="store_true", help="Record real node/TID/priority boundaries; requires generic runtime")
+
+    c_ct = sub.add_parser("condition-timing", help="Measure both paths and publish conditional algorithm inputs")
+    c_ct.add_argument("--base-name", required=True)
+    c_ct.add_argument("--cores", required=True, type=int)
+    c_ct.add_argument("--seed-algo", default="FIFO", choices=["FIFO", "LPF", "heft", "t_level", "zhao2020"])
+    c_ct.add_argument("--repeats", type=int, default=5)
+    c_ct.add_argument("--condition-env", default="CODE2DAG_CONDITION")
+
+    c_cr = sub.add_parser("condition-run", help="Fresh native generation through conditional schedules and compiled traced programs")
+    c_cr.add_argument("--source", required=True, type=Path)
+    c_cr.add_argument("--output-dir", required=True, type=Path)
+    c_cr.add_argument("--cores", required=True, type=int)
+    c_cr.add_argument("--seed-algo", default="FIFO", choices=["FIFO", "LPF", "heft", "t_level", "zhao2020"])
+    c_cr.add_argument("--repeats", type=int, default=5)
+    c_cr.add_argument("--condition-env", default="CODE2DAG_CONDITION")
+    c_cr.add_argument("--execute", action="store_true", help="Continue through controlled Linux execution; requires realtime permission")
+    c_cr.add_argument("--experiment-repeats", type=int, default=30)
+
+    c_ce = sub.add_parser("condition-experiment", help="Run prepared Linux comparison; actual FIFO permission required")
+    c_ce.add_argument("--prepared", type=Path, required=True)
+    c_ce.add_argument("--output-dir", type=Path, required=True)
+    c_ce.add_argument("--repeats", type=int, default=30)
+    c_ce.add_argument("--warmups", type=int, default=3)
+    c_ce.add_argument("--control-only", action="store_true")
+
     c_info = sub.add_parser("list", help="List rules and algos")
     c_info.add_argument("--level", default=None, choices=["level1", "level2", "level3"])
 
@@ -84,6 +110,34 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     args = ap.parse_args(argv)
     base_dir = args.base_dir.resolve()
+
+    if args.cmd == "condition-experiment":
+        from .condition_experiment import run_comparison
+        result = run_comparison(prepared_file=args.prepared.resolve(), output_dir=args.output_dir.resolve(),
+                                repeats=args.repeats, warmups=args.warmups, control_only=args.control_only)
+        _print_json({"status": result["status"], "output_dir": str(args.output_dir.resolve()),
+                     "hardware_fifo_verified": result["hardware_fifo_verified"], "run_count": result["run_count"]})
+        return 0
+
+    if args.cmd == "condition-timing":
+        from .condition_pipeline import run_condition_timing
+        _print_json(run_condition_timing(base_dir=base_dir, base_name=args.base_name, cores=args.cores,
+                    seed_algo=args.seed_algo, repeats=args.repeats, condition_env=args.condition_env))
+        return 0
+
+    if args.cmd == "condition-run":
+        from .condition_pipeline import prepare_condition_run
+        prepared = prepare_condition_run(source=args.source.resolve(), output_dir=args.output_dir.resolve(),
+                    runtime_base=base_dir, cores=args.cores, seed_algo=args.seed_algo, repeats=args.repeats,
+                    condition_env=args.condition_env)
+        if args.execute:
+            from .condition_experiment import run_comparison
+            result = run_comparison(prepared_file=args.output_dir.resolve()/"prepared.json",
+                        output_dir=args.output_dir.resolve()/"experiment", repeats=args.experiment_repeats)
+            prepared["hardware_test_completed"] = result["hardware_fifo_verified"]
+            prepared["experiment_output"] = str(args.output_dir.resolve()/"experiment")
+        _print_json(prepared)
+        return 0
 
     if args.cmd == "collect":
         base_name = _resolve_base_name(args.base_name, args.source, None)
@@ -135,6 +189,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             rule_name=args.rule,
             algo_name=args.algo,
             instrument_mode=args.mode,
+            segment_trace=args.segment_trace,
         )
         _print_json(payload)
         return 0
@@ -159,7 +214,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         base_name = _resolve_base_name(args.base_name, source, None)
         level = args.level
         rule = args.rule or default_rule_for_level(level) or "effective_line_merge"
-        algos = sorted(list_algos().keys())
+        # Conditional algorithms are opt-in and require two measured profiles.
+        algos = sorted(name for name in list_algos() if not name.startswith("condition_"))
 
         print(f"=== Pipeline full workflow: {base_name} ===")
         print(f"    Source file: {source}")

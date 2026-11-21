@@ -2,7 +2,16 @@ from __future__ import annotations
 
 ALLOWED_LEVELS = {"level1", "level2", "level3"}
 ALLOWED_VIEWS = {"single"}
-STANDARD_KINDS = {"compute", "mutex_cs", "create", "join", "sem_wait", "sem_post"}
+STANDARD_KINDS = {
+    "compute",
+    "mutex_cs",
+    "create",
+    "join",
+    "sem_wait",
+    "sem_post",
+    "condition_entry",
+    "condition_exit",
+}
 
 SCHEMA_VERSION = "1.0"
 

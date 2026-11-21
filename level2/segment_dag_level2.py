@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from ..level1.segment_dag import _iter_stage1_cut_points  # type: ignore
 from ..level1.segment_dag import _load_functions_full, _load_functions_ranges, _load_internal_meta  # type: ignore
+from ..core.func_ranges import normalize_func_name, _strip_comments_and_strings
 
 
 @dataclass(frozen=True)
@@ -83,9 +84,14 @@ def _pair_mutex_intervals(
     return intervals
 
 
-def _parse_circle_sem_pairs(circle_path: Path) -> List[Tuple[str, str]]:
-    """Return list of (post_node, wait_node) parsed from circle.txt."""
-    pairs: Dict[str, Dict[str, Optional[str]]] = {}
+def _parse_circle_sem_calls(circle_path: Path) -> List[Dict[str, object]]:
+    """Return every sem_post/sem_wait record, preserving multiplicity.
+
+    The legacy pair parser deliberately kept only one post and one wait per
+    semaphore variable.  This collector keeps all source occurrences so the
+    build can distinguish a determinate relation from an ambiguous one.
+    """
+    calls: List[Dict[str, object]] = []
     block = None
     for line in circle_path.read_text(encoding="utf-8", errors="ignore").splitlines():
         s = line.strip()
@@ -104,16 +110,566 @@ def _parse_circle_sem_pairs(circle_path: Path) -> List[Tuple[str, str]]:
         if len(parts) < 3:
             continue
         node, _tag, idx = parts[0], parts[1], parts[2]
-        rec = pairs.setdefault(idx, {"post": None, "wait": None})
+        line_no: Optional[int] = None
+        if len(parts) >= 4:
+            try:
+                line_no = int(parts[3])
+            except ValueError:
+                line_no = None
         if "sem_post" in node:
-            rec["post"] = node
+            kind = "post"
         elif "sem_wait" in node:
-            rec["wait"] = node
-    out: List[Tuple[str, str]] = []
-    for rec in pairs.values():
-        if rec.get("post") and rec.get("wait"):
-            out.append((rec["post"], rec["wait"]))  # type: ignore[arg-type]
-    return out
+            kind = "wait"
+        else:
+            continue
+        calls.append({"node": node, "kind": kind, "idx": idx, "line": line_no})
+    return calls
+
+
+def _sem_pairs_from_calls(calls: Sequence[Dict[str, object]]) -> List[Tuple[str, str]]:
+    """Return one deterministic (last post, last wait) pair per semaphore.
+
+    This is only a representative witness for rules that project the
+    relation per branch/iteration.  Determinacy is checked separately before
+    any graph is published.
+    """
+    groups: Dict[str, Dict[str, str]] = {}
+    for call in calls:
+        idx = str(call["idx"])
+        kind = str(call["kind"])
+        groups.setdefault(idx, {})[kind] = str(call["node"])
+    return [(g["post"], g["wait"]) for g in groups.values() if g.get("post") and g.get("wait")]
+
+
+def _parse_circle_sem_pairs(circle_path: Path) -> List[Tuple[str, str]]:
+    """Return list of (post_node, wait_node) parsed from circle.txt."""
+    return _sem_pairs_from_calls(_parse_circle_sem_calls(circle_path))
+
+
+def _sem_paths_compatible(left: Sequence[Tuple[str, str]], right: Sequence[Tuple[str, str]]) -> bool:
+    """True when two source positions can occur on one feasible branch path."""
+    left_map = dict(left)
+    right_map = dict(right)
+    return all(left_map[key] == right_map[key] for key in set(left_map) & set(right_map))
+
+
+def _sem_call_branch_path(
+    *,
+    function: str,
+    line: int,
+    regions: Sequence[object],
+) -> Tuple[Tuple[str, str], ...]:
+    path: List[Tuple[str, str]] = []
+    for region in regions:
+        if getattr(region, "function", None) != function:
+            continue
+        for branch in getattr(region, "branches", ()):  # type: ignore[attr-defined]
+            start = getattr(branch, "start_line", None)
+            end = getattr(branch, "end_line", None)
+            if not isinstance(start, int) or not isinstance(end, int):
+                continue
+            if start <= line <= end:
+                path.append((str(getattr(region, "condition_id")), str(getattr(branch, "branch_id"))))
+    return tuple(path)
+
+
+def _validate_semaphore_determinacy(
+    *,
+    sem_calls: Sequence[Dict[str, object]],
+    source_text: str,
+    fn_range: Dict[str, Tuple[int, int]],
+    node_owner_line: Dict[str, Tuple[str, int]],
+) -> None:
+    """Reject semaphore relations with two same-kind calls on one path.
+
+    A semaphore variable is determinate when every feasible execution path
+    contains at most one post and at most one wait for that variable.  A
+    common post with waits in mutually exclusive branches is determinate; two
+    posts (or two waits) that can execute on the same path are not.  Calls in
+    different functions have no common branch context and are treated as
+    potentially concurrent, so two posts (or two waits) in different functions
+    are also rejected unless the source structure proves otherwise.
+    """
+    groups: Dict[str, List[Dict[str, object]]] = {}
+    for call in sem_calls:
+        groups.setdefault(str(call["idx"]), []).append(call)
+    ambiguous_groups = {
+        idx: calls for idx, calls in groups.items()
+        if len([c for c in calls if c["kind"] == "post"]) > 1
+        or len([c for c in calls if c["kind"] == "wait"]) > 1
+    }
+    if not ambiguous_groups:
+        return
+    regions: Sequence[object] = ()
+    analysis_error: Optional[Exception] = None
+    try:
+        from ..pipeline.condition_model import analyze_conditionals
+        analysis = analyze_conditionals(source_text, fn_range)
+        fatal = [d for d in analysis.diagnostics if d.get("severity") == "error"]
+        if fatal:
+            raise ValueError("condition analysis failed")
+        regions = analysis.regions
+    except Exception as exc:  # noqa: BLE001 - conservatively reject on analysis failure
+        analysis_error = exc
+
+    for idx, calls in ambiguous_groups.items():
+        paths: Dict[str, Tuple[Tuple[str, str], ...]] = {}
+        for call in calls:
+            node = str(call["node"])
+            owner = node_owner_line.get(node)
+            if owner is not None:
+                function, line = owner
+            else:
+                function = node.split("/", 1)[0]
+                line_value = call.get("line")
+                if not isinstance(line_value, int):
+                    raise ValueError(
+                        f"ambiguous semaphore '{idx}': cannot locate source line for {node}; "
+                        "refusing to publish a sem_dep relation"
+                    )
+                line = line_value
+            if analysis_error is not None or function not in fn_range:
+                raise ValueError(
+                    f"ambiguous semaphore '{idx}': cannot determine branch context for {node}; "
+                    "refusing to publish a sem_dep relation"
+                )
+            paths[node] = _sem_call_branch_path(function=function, line=line, regions=regions)
+        for kind in ("post", "wait"):
+            same_kind = [str(c["node"]) for c in calls if c["kind"] == kind]
+            for i, left in enumerate(same_kind):
+                for right in same_kind[i + 1:]:
+                    if _sem_paths_compatible(paths[left], paths[right]):
+                        detail = ", ".join(f"{n}@{next((c.get('line') for c in calls if c['node'] == n), '?')}" for n in (left, right))
+                        raise ValueError(
+                            f"ambiguous semaphore '{idx}': {kind} calls {detail} can execute on the same path; "
+                            "refusing to publish a sem_dep relation"
+                        )
+
+
+def _validate_semaphore_branch_pairing(
+    *,
+    sem_calls: Sequence[Dict[str, object]],
+    source_text: str,
+    fn_range: Dict[str, Tuple[int, int]],
+    node_owner_line: Dict[str, Tuple[str, int]],
+) -> None:
+    """Reject post/wait pairs that cannot occur on a compatible wait path.
+
+    A wait may only be paired with a post that is guaranteed earlier on every
+    candidate path containing the wait.  For calls in one execution function,
+    this means the post's condition membership must be a subset of the wait's
+    membership and the source order must be post-before-wait.  For calls in
+    different execution functions, the post must be unconditional; different
+    threads' branch labels cannot be compared.
+
+    Calls outside all modeled conditions have empty paths.  When both calls
+    are unconditional in one function, the existing same-segment/final-cycle
+    validation remains responsible for source order; this validator does not
+    change that legacy rejection path.
+
+    The phase-1 condition model represents structured if/else regions only.
+    A switch can select mutually exclusive cases and a goto can jump over a
+    post or into a wait without appearing in any region, so any function that
+    owns a call of a paired semaphore and contains ``switch`` or ``goto`` is
+    rejected conservatively.
+    """
+    groups: Dict[str, List[Dict[str, object]]] = {}
+    for call in sem_calls:
+        groups.setdefault(str(call["idx"]), []).append(call)
+    paired = {
+        idx: calls
+        for idx, calls in groups.items()
+        if any(str(c.get("kind")) == "post" for c in calls)
+        and any(str(c.get("kind")) == "wait" for c in calls)
+    }
+    if not paired:
+        return
+
+    try:
+        from ..pipeline.condition_model import analyze_conditionals
+
+        analysis = analyze_conditionals(source_text, fn_range)
+        fatal = [d for d in analysis.diagnostics if d.get("severity") == "error"]
+        if fatal:
+            raise ValueError("condition analysis failed")
+        regions = analysis.regions
+    except Exception as exc:  # noqa: BLE001 - conservatively reject on missing proof
+        raise ValueError(
+            "cannot determine condition paths for a paired semaphore; "
+            "refusing to publish a sem_dep relation"
+        ) from exc
+
+    for idx, calls in paired.items():
+        paths: Dict[str, Tuple[Tuple[str, str], ...]] = {}
+        owners: Dict[str, Tuple[str, int]] = {}
+        for call in calls:
+            node = str(call["node"])
+            owner = node_owner_line.get(node)
+            if owner is None:
+                value = call.get("line")
+                if not isinstance(value, int):
+                    raise ValueError(
+                        f"semaphore '{idx}': cannot locate source line for {node}; "
+                        "refusing to publish a sem_dep relation"
+                    )
+                function = node.split("/", 1)[0]
+                line_no = value
+            else:
+                function, line_no = owner
+            if function not in fn_range:
+                raise ValueError(
+                    f"semaphore '{idx}': cannot determine function context for {node}; "
+                    "refusing to publish a sem_dep relation"
+                )
+            owners[node] = (function, line_no)
+            paths[node] = _sem_call_branch_path(
+                function=function, line=line_no, regions=regions
+            )
+
+        posts = [str(c["node"]) for c in calls if str(c.get("kind")) == "post"]
+        waits = [str(c["node"]) for c in calls if str(c.get("kind")) == "wait"]
+
+        # The phase-1 condition model covers structured if/else regions only.
+        # A switch may select a post/wait case that is mutually exclusive with
+        # the paired call, and a goto may jump over a post (or into a wait).
+        # Neither construct is represented in analysis.regions, so a path
+        # proof that ignores them would accept a pairing it cannot justify.
+        # Reject conservatively for every function that owns a call of this
+        # semaphore.
+        clean_lines = _strip_comments_and_strings(source_text).splitlines()
+        for function in sorted({owners[node][0] for node in posts + waits}):
+            start, end = fn_range[function]
+            body = "\n".join(clean_lines[max(start - 1, 0):end])
+            for token, pattern in (
+                ("switch", r"\bswitch\s*\("),
+                ("goto", r"\bgoto\b"),
+            ):
+                if re.search(pattern, body):
+                    raise ValueError(
+                        f"semaphore '{idx}': function {function} contains unmodeled "
+                        f"'{token}' control flow; cannot prove post/wait branch "
+                        "reachability; refusing to publish a sem_dep relation"
+                    )
+
+        for wait in waits:
+            wait_fn, wait_line = owners[wait]
+            wait_path = paths[wait]
+            dominating = []
+            for post in posts:
+                post_fn, post_line = owners[post]
+                post_path = paths[post]
+                if post_fn != wait_fn:
+                    # Different threads' condition labels are not comparable.
+                    # Only an unconditional post guarantees a token on every
+                    # possible wait path.
+                    if not post_path:
+                        dominating.append(post)
+                    continue
+                if not set(post_path) <= set(wait_path):
+                    continue
+                if post_path == () and wait_path == ():
+                    # Preserve the existing same-segment/final-cycle handling
+                    # for unconditional same-function calls.
+                    dominating.append(post)
+                    continue
+                if post_line < wait_line:
+                    dominating.append(post)
+                    continue
+                if post_line > wait_line:
+                    continue
+                post_order = _sem_call_source_offset(
+                    node=post,
+                    kind="post",
+                    function=post_fn,
+                    line_no=post_line,
+                    source_text=source_text,
+                    sem_calls=sem_calls,
+                    node_owner_line=node_owner_line,
+                )
+                wait_order = _sem_call_source_offset(
+                    node=wait,
+                    kind="wait",
+                    function=wait_fn,
+                    line_no=wait_line,
+                    source_text=source_text,
+                    sem_calls=sem_calls,
+                    node_owner_line=node_owner_line,
+                )
+                if post_order is not None and wait_order is not None and post_order < wait_order:
+                    dominating.append(post)
+            if not dominating:
+                raise ValueError(
+                    f"semaphore '{idx}': wait {wait} has no post on a compatible "
+                    "candidate branch path with post-before-wait order; "
+                    "refusing to publish a sem_dep relation"
+                )
+
+
+def _validate_semaphore_dynamic_instances(
+    *,
+    sem_calls: Sequence[Dict[str, object]],
+    internal_meta: Dict[str, Dict[str, Dict]],
+    node_owner_line: Dict[str, Tuple[str, int]],
+) -> None:
+    """Reject paired semaphore calls owned by multiple execution instances.
+
+    The per-function internal metadata is the earliest place where the source
+    call identity and the concrete execution instance (``worker`` versus
+    ``worker@instance1``) are both known.  The later deduplicated
+    ``node_owner_line`` map deliberately keeps only the last clone, so it
+    cannot be used to prove a unique dynamic pairing.
+    """
+    source_owners: Dict[Tuple[str, int, str], Set[str]] = {}
+    node_keys: Dict[str, Set[Tuple[str, int, str]]] = {}
+    for fn, meta_map in internal_meta.items():
+        if not isinstance(meta_map, dict):
+            continue
+        base_fn = normalize_func_name(fn)
+        for node, meta in meta_map.items():
+            if not isinstance(node, str) or not isinstance(meta, dict):
+                continue
+            line = meta.get("line")
+            if not isinstance(line, int):
+                continue
+            if _SEM_POST_NODE_RE.search(node):
+                kind = "post"
+            elif _SEM_WAIT_NODE_RE.search(node):
+                kind = "wait"
+            else:
+                continue
+            key = (base_fn, line, kind)
+            source_owners.setdefault(key, set()).add(fn)
+            node_keys.setdefault(node, set()).add(key)
+
+    groups: Dict[str, List[Dict[str, object]]] = {}
+    for call in sem_calls:
+        groups.setdefault(str(call["idx"]), []).append(call)
+    for idx, calls in groups.items():
+        kinds = {str(call["kind"]) for call in calls}
+        if not {"post", "wait"} <= kinds:
+            continue
+        for call in calls:
+            node = str(call["node"])
+            keys = set(node_keys.get(node, set()))
+            if not keys:
+                owner = node_owner_line.get(node)
+                if owner is not None:
+                    keys.add((normalize_func_name(owner[0]), owner[1], str(call["kind"])))
+            for key in keys:
+                owners = source_owners.get(key, set())
+                if len(owners) > 1:
+                    base_fn, line, kind = key
+                    raise ValueError(
+                        f"semaphore '{idx}': {kind} source call {node} at "
+                        f"{base_fn}:{line} executes in multiple dynamic thread "
+                        f"instances {sorted(owners)}; cannot prove a unique dynamic "
+                        "pairing; refusing to publish a sem_dep relation"
+                    )
+
+
+_SEM_POST_SOURCE_RE = re.compile(r"\bsem_post\s*\(\s*&\s*([A-Za-z_]\w*)\s*\)")
+_SEM_WAIT_SOURCE_RE = re.compile(r"\bsem_wait\s*\(\s*&\s*([A-Za-z_]\w*)\s*\)")
+_SEM_INIT_SOURCE_RE = re.compile(
+    r"\bsem_init\s*\(\s*&\s*([A-Za-z_]\w*)\s*,\s*[^,]+,\s*([^)]+)\)"
+)
+
+
+def _sem_call_source_variables(
+    *,
+    calls: Sequence[Dict[str, object]],
+    all_calls: Sequence[Dict[str, object]],
+    source_lines: Sequence[str],
+    node_owner_line: Dict[str, Tuple[str, int]],
+) -> Set[str]:
+    """Resolve source variable names for one circle.txt semaphore group.
+
+    Circle.txt omits the source column.  Several calls may share one source
+    line (the DAG fixtures intentionally do this), so select the same
+    occurrence in the source line as the call's order within that line and
+    kind.
+    """
+    variables: Set[str] = set()
+    for call in calls:
+        node = str(call["node"])
+        owner = node_owner_line.get(node)
+        if owner is not None:
+            function, line_no = owner
+        else:
+            function = node.split("/", 1)[0]
+            value = call.get("line")
+            if not isinstance(value, int):
+                return set()
+            line_no = value
+        if not (1 <= line_no <= len(source_lines)):
+            return set()
+        kind = str(call["kind"])
+        pattern = _SEM_POST_SOURCE_RE if kind == "post" else _SEM_WAIT_SOURCE_RE
+        matches = pattern.findall(source_lines[line_no - 1])
+        if not matches:
+            # The call argument may be split over several source lines, e.g.
+            # sem_wait(\n    &sem_x\n);  Keep the window narrow and reject if
+            # it is still ambiguous.
+            start = max(0, line_no - 2)
+            end = min(len(source_lines), line_no + 3)
+            matches = pattern.findall("\n".join(source_lines[start:end]))
+            if len(matches) != 1:
+                return set()
+            variables.add(matches[0])
+            continue
+        if len(matches) == 1:
+            variables.add(matches[0])
+            continue
+        same_line = []
+        for other in all_calls:
+            other_node = str(other["node"])
+            other_owner = node_owner_line.get(other_node)
+            if other_owner is not None:
+                other_function, other_line = other_owner
+            else:
+                other_value = other.get("line")
+                if not isinstance(other_value, int):
+                    continue
+                other_function, other_line = other_node.split("/", 1)[0], other_value
+            if (
+                other_function == function
+                and other_line == line_no
+                and str(other["kind"]) == kind
+            ):
+                same_line.append(other)
+        position = next(
+            (index for index, other in enumerate(same_line) if other is call),
+            None,
+        )
+        if position is None or position >= len(matches):
+            return set()
+        variables.add(matches[position])
+    return variables
+
+
+def _sem_call_source_offset(
+    *,
+    node: str,
+    kind: str,
+    function: str,
+    line_no: int,
+    source_text: str,
+    sem_calls: Sequence[Dict[str, object]],
+    node_owner_line: Dict[str, Tuple[str, int]],
+) -> Optional[Tuple[int, int]]:
+    """Return (line, column) for one concrete same-line semaphore call.
+
+    The base metadata records only source lines, not columns.  For a same-line
+    post/wait pair the line order is therefore insufficient: resolve the
+    particular node to its occurrence on that line using the circle call order.
+    Any ambiguity returns None so callers can reject instead of guessing.
+    """
+    clean = _strip_comments_and_strings(source_text)
+    lines = clean.splitlines()
+    if not (1 <= line_no <= len(lines)):
+        return None
+    pattern = _SEM_POST_SOURCE_RE if kind == "post" else _SEM_WAIT_SOURCE_RE
+    matches = list(pattern.finditer(lines[line_no - 1]))
+    if not matches:
+        return None
+    same_kind = []
+    for call in sem_calls:
+        if str(call.get("kind")) != kind:
+            continue
+        other_node = str(call.get("node"))
+        owner = node_owner_line.get(other_node)
+        if owner is None:
+            other_value = call.get("line")
+            if not isinstance(other_value, int):
+                continue
+            other_function = other_node.split("/", 1)[0]
+            other_line = other_value
+        else:
+            other_function, other_line = owner
+        if other_function == function and other_line == line_no:
+            same_kind.append(other_node)
+    positions = [index for index, value in enumerate(same_kind) if value == node]
+    if len(positions) != 1 or positions[0] >= len(matches):
+        return None
+    return line_no, matches[positions[0]].start()
+
+
+def _sem_init_initial_counts(source_text: str) -> Dict[str, List[Optional[int]]]:
+    """Parse literal sem_init initial counts per source semaphore variable.
+
+    Only decimal integer literals are recognized.  Expressions, macros and
+    missing/multiple initializers are intentionally left undecidable.
+    """
+    values: Dict[str, List[Optional[int]]] = {}
+    for match in _SEM_INIT_SOURCE_RE.finditer(source_text):
+        var = match.group(1)
+        raw = match.group(2).strip()
+        if re.fullmatch(r"0+[uUlL]*", raw):
+            value: Optional[int] = 0
+        elif re.fullmatch(r"[1-9]\d*[uUlL]*", raw):
+            value = int(re.match(r"\d+", raw).group(0))  # type: ignore[union-attr]
+        else:
+            value = None
+        values.setdefault(var, []).append(value)
+    return values
+
+
+def _validate_semaphore_initial_counts(
+    *,
+    sem_calls: Sequence[Dict[str, object]],
+    source_text: str,
+    node_owner_line: Dict[str, Tuple[str, int]],
+) -> None:
+    """Reject paired semaphores whose wait may not need the matched post.
+
+    Only a literal zero initial count is accepted.  A non-zero count can let
+    sem_wait consume the initial token and proceed without the matched post;
+    an unknown initializer has the same risk.  This explicitly does not add
+    counting-semaphore semantics.  A same-segment zero-count pair remains an
+    internal witness and never becomes a final scheduling self-loop.
+    """
+    groups: Dict[str, List[Dict[str, object]]] = {}
+    for call in sem_calls:
+        groups.setdefault(str(call["idx"]), []).append(call)
+    source_lines = source_text.splitlines()
+    initial_counts = _sem_init_initial_counts(source_text)
+
+    for idx, calls in groups.items():
+        posts = [str(c["node"]) for c in calls if c["kind"] == "post"]
+        waits = [str(c["node"]) for c in calls if c["kind"] == "wait"]
+        if not posts or not waits:
+            continue
+
+        variables = _sem_call_source_variables(
+            calls=calls,
+            all_calls=sem_calls,
+            source_lines=source_lines,
+            node_owner_line=node_owner_line,
+        )
+        if len(variables) != 1:
+            raise ValueError(
+                f"semaphore '{idx}': cannot resolve the source semaphore variable; "
+                "refusing to publish a cross-segment sem_dep relation"
+            )
+        var = next(iter(variables))
+        counts = initial_counts.get(var, [])
+        if len(counts) != 1:
+            raise ValueError(
+                f"semaphore '{idx}': cannot determine a unique literal sem_init "
+                f"initial count for '{var}'; refusing to publish a cross-segment "
+                "sem_dep relation"
+            )
+        initial = counts[0]
+        if initial is None:
+            raise ValueError(
+                f"semaphore '{idx}': sem_init initial count for '{var}' is not "
+                "a literal integer; refusing to publish a cross-segment sem_dep relation"
+            )
+        if initial != 0:
+            raise ValueError(
+                f"semaphore '{idx}': sem_init initial count {initial} for '{var}' "
+                "may let sem_wait proceed without the matched sem_post; refusing "
+                "to publish a cross-segment sem_dep relation"
+            )
 
 
 def _parse_sem_pairs_from_dot(dot_path: Path) -> List[Tuple[str, str]]:
@@ -376,33 +932,43 @@ def build_level2_segments_and_dag(
         fn_range=fn_range,
     )
 
-    for node, (owner_fn, line) in node_owner_line.items():
-        if owner_fn not in fn_range:
+    # Cut points are per source function.  Shared node names of @instanceN
+    # clones are globally deduplicated in node_owner_line (last clone wins),
+    # so using that map here would give only one clone the lock/unlock cuts.
+    # Read each function's own internal_meta entries instead.
+    for owner_fn, meta_map in internal_meta.items():
+        if owner_fn not in fn_range or not isinstance(meta_map, dict):
             continue
         start_line, _end_line = fn_range[owner_fn]
+        for node, meta in meta_map.items():
+            if not isinstance(node, str) or not isinstance(meta, dict):
+                continue
+            line = meta.get("line")
+            if not isinstance(line, int):
+                continue
 
-        if _CREATE_NODE_RE.search(node):
-            cut_after_by_fn.setdefault(owner_fn, set()).add(line)
-            create_lines_by_fn.setdefault(owner_fn, []).append(line)
-        elif _SEM_POST_NODE_RE.search(node):
-            cut_after_by_fn.setdefault(owner_fn, set()).add(line)
-            sem_post_lines_by_fn.setdefault(owner_fn, []).append(line)
-        elif _MU_UNLOCK_NODE_RE.search(node):
-            cut_after_by_fn.setdefault(owner_fn, set()).add(line)
-            unlock_lines_by_fn.setdefault(owner_fn, set()).add(line)
+            if _CREATE_NODE_RE.search(node):
+                cut_after_by_fn.setdefault(owner_fn, set()).add(line)
+                create_lines_by_fn.setdefault(owner_fn, []).append(line)
+            elif _SEM_POST_NODE_RE.search(node):
+                cut_after_by_fn.setdefault(owner_fn, set()).add(line)
+                sem_post_lines_by_fn.setdefault(owner_fn, []).append(line)
+            elif _MU_UNLOCK_NODE_RE.search(node):
+                cut_after_by_fn.setdefault(owner_fn, set()).add(line)
+                unlock_lines_by_fn.setdefault(owner_fn, set()).add(line)
 
-        if _JOIN_NODE_RE.search(node):
-            if line - 1 >= start_line:
-                cut_after_by_fn.setdefault(owner_fn, set()).add(line - 1)
-            join_lines_by_fn.setdefault(owner_fn, []).append(line)
-        elif _SEM_WAIT_NODE_RE.search(node):
-            if line - 1 >= start_line:
-                cut_after_by_fn.setdefault(owner_fn, set()).add(line - 1)
-            sem_wait_lines_by_fn.setdefault(owner_fn, []).append(line)
-        elif _MU_LOCK_NODE_RE.search(node):
-            if line - 1 >= start_line:
-                cut_after_by_fn.setdefault(owner_fn, set()).add(line - 1)
-            lock_lines_by_fn.setdefault(owner_fn, set()).add(line)
+            if _JOIN_NODE_RE.search(node):
+                if line - 1 >= start_line:
+                    cut_after_by_fn.setdefault(owner_fn, set()).add(line - 1)
+                join_lines_by_fn.setdefault(owner_fn, []).append(line)
+            elif _SEM_WAIT_NODE_RE.search(node):
+                if line - 1 >= start_line:
+                    cut_after_by_fn.setdefault(owner_fn, set()).add(line - 1)
+                sem_wait_lines_by_fn.setdefault(owner_fn, []).append(line)
+            elif _MU_LOCK_NODE_RE.search(node):
+                if line - 1 >= start_line:
+                    cut_after_by_fn.setdefault(owner_fn, set()).add(line - 1)
+                lock_lines_by_fn.setdefault(owner_fn, set()).add(line)
 
     # Thread boundary rules
     entry_cut_applied: Dict[str, bool] = {}
@@ -538,6 +1104,38 @@ def build_level2_segments_and_dag(
             return None
         return segs[idx].seg_id
 
+    # The generation metadata maps a handle to the base function name, while the
+    # create cut already points at the actual @instanceN execution clone.  Pair
+    # each join with the instance created by the same handle so the join edge
+    # lands on that instance's executable tail instead of the first clone's.
+    create_handle_to_instance: Dict[str, str] = {}
+    for c in cuts:
+        if c.kind != "create" or not c.entry_fn:
+            continue
+        if not (1 <= c.line <= len(source_lines)):
+            continue
+        m = re.search(r"\bpthread_create\s*\(\s*&\s*(\w+)", source_lines[c.line - 1])
+        if m:
+            create_handle_to_instance[m.group(1)] = c.entry_fn
+    instance_groups: Dict[str, List[str]] = {}
+    for fn in segs_by_fn:
+        instance_groups.setdefault(normalize_func_name(fn), []).append(fn)
+    multi_instance_bases = {
+        base: sorted(fns) for base, fns in instance_groups.items() if len(fns) > 1
+    }
+    join_line_to_instance: Dict[int, str] = {}
+    join_line_to_handle: Dict[int, str] = {}
+    for c in cuts:
+        if c.kind != "join":
+            continue
+        if not (1 <= c.line <= len(source_lines)):
+            continue
+        m = re.search(r"\bpthread_join\s*\(\s*(\w+)", source_lines[c.line - 1])
+        if m:
+            join_line_to_handle[c.line] = m.group(1)
+            if m.group(1) in create_handle_to_instance:
+                join_line_to_instance[c.line] = create_handle_to_instance[m.group(1)]
+
     # Create/join semantic edges (reuse legacy mapping logic from level1 cut points)
     for c in cuts:
         if c.kind == "create" and c.entry_fn:
@@ -545,9 +1143,29 @@ def build_level2_segments_and_dag(
             dst_list = segs_by_fn.get(c.entry_fn)
             if src and dst_list:
                 edges.append((src, dst_list[0].seg_id, "create"))
-        elif c.kind == "join" and c.entry_fn:
+        elif c.kind == "join":
             dst = _find_seg_id(c.function, c.line)
-            src_list = segs_by_fn.get(c.entry_fn)
+            entry_fn = join_line_to_instance.get(c.line)
+            if entry_fn is None:
+                handle = join_line_to_handle.get(c.line, "<unparsed>")
+                if c.entry_fn is not None:
+                    # A handle that cannot be paired to a create must not
+                    # silently fall back to the base function when that source
+                    # function has multiple @instanceN executions.
+                    base = normalize_func_name(c.entry_fn)
+                    candidates = sorted(fn for fn in segs_by_fn if normalize_func_name(fn) == base)
+                    if len(candidates) > 1:
+                        raise ValueError(
+                            f"ambiguous join handle '{handle}' at line {c.line}: "
+                            f"multiple execution instances {candidates}; "
+                            f"cannot fall back to base function '{c.entry_fn}'")
+                    entry_fn = candidates[0] if candidates else c.entry_fn
+                elif multi_instance_bases:
+                    raise ValueError(
+                        f"cannot resolve join handle '{handle}' at line {c.line}: "
+                        f"no base function mapping and multiple execution instances "
+                        f"{multi_instance_bases}")
+            src_list = segs_by_fn.get(entry_fn) if entry_fn is not None else None
             if dst and src_list:
                 edges.append((src_list[-1].seg_id, dst, "join"))
 
@@ -561,7 +1179,31 @@ def build_level2_segments_and_dag(
         circle_path = level2_merge_root / "circle.txt"
     if not circle_path.exists():
         raise FileNotFoundError(f"missing circle.txt: {circle_path}")
-    sem_pairs: List[Tuple[str, str]] = _parse_circle_sem_pairs(circle_path)
+    sem_calls = _parse_circle_sem_calls(circle_path)
+    _validate_semaphore_determinacy(
+        sem_calls=sem_calls,
+        source_text="\n".join(source_lines),
+        fn_range=fn_range,
+        node_owner_line=node_owner_line,
+    )
+    _validate_semaphore_dynamic_instances(
+        sem_calls=sem_calls,
+        internal_meta=internal_meta,
+        node_owner_line=node_owner_line,
+    )
+    sem_pairs: List[Tuple[str, str]] = _sem_pairs_from_calls(sem_calls)
+    _validate_semaphore_initial_counts(
+        sem_calls=sem_calls,
+        source_text="\n".join(source_lines),
+        node_owner_line=node_owner_line,
+    )
+    _validate_semaphore_branch_pairing(
+        sem_calls=sem_calls,
+        source_text="\n".join(source_lines),
+        fn_range=fn_range,
+        node_owner_line=node_owner_line,
+    )
+    internal_sem_witnesses: List[Dict[str, object]] = []
 
     for post_node, wait_node in sem_pairs:
         post = node_owner_line.get(post_node)
@@ -573,6 +1215,60 @@ def build_level2_segments_and_dag(
         sp = _find_seg_id(post_fn, post_line)
         sw = _find_seg_id(wait_fn, wait_line)
         if sp and sw:
+            if sp == sw:
+                # A determinate pair can fall inside one merged segment.  Keep
+                # the witness for projection-aware rules, but only when the
+                # source order is provably post-before-wait.  A wait before its
+                # post would block in the source, and an unconfirmed same-line
+                # order must not be silently absorbed as if it were ordered.
+                if post_fn != wait_fn:
+                    raise ValueError(
+                        f"same-segment sem_dep pair {post_node} -> {wait_node} "
+                        "belongs to different execution instances; refusing to "
+                        "absorb an internal witness"
+                    )
+                if post_line < wait_line:
+                    ordered = True
+                elif post_line > wait_line:
+                    ordered = False
+                else:
+                    post_order = _sem_call_source_offset(
+                        node=post_node,
+                        kind="post",
+                        function=post_fn,
+                        line_no=post_line,
+                        source_text="\n".join(source_lines),
+                        sem_calls=sem_calls,
+                        node_owner_line=node_owner_line,
+                    )
+                    wait_order = _sem_call_source_offset(
+                        node=wait_node,
+                        kind="wait",
+                        function=wait_fn,
+                        line_no=wait_line,
+                        source_text="\n".join(source_lines),
+                        sem_calls=sem_calls,
+                        node_owner_line=node_owner_line,
+                    )
+                    ordered = bool(
+                        post_order is not None
+                        and wait_order is not None
+                        and post_order < wait_order
+                    )
+                if not ordered:
+                    raise ValueError(
+                        f"same-segment sem_dep pair {post_node} -> {wait_node} "
+                        "is not provably post-before-wait; refusing to absorb "
+                        "an internal witness"
+                    )
+                # A determinate pair can fall inside one merged segment.  Keep
+                # the witness for projection-aware rules, but mark it internal
+                # so final publication can absorb it instead of exposing a
+                # scheduling self-loop.
+                internal_sem_witnesses.append(
+                    {"src": sp, "dst": sw, "kind": "sem_dep",
+                     "post": post_node, "wait": wait_node}
+                )
             edges.append((sp, sw, "sem_dep"))
 
     dag_edges = [{"src": s, "dst": d, "kind": k} for (s, d, k) in edges]
@@ -596,6 +1292,12 @@ def build_level2_segments_and_dag(
         "thread_entry_functions": sorted(thread_entry_fns),
         "entry_cut_applied": entry_cut_applied,
         "exit_cut_applied": exit_cut_applied,
+        "node_locations": {
+            node: {"function": owner, "line": line}
+            for node, (owner, line) in sorted(node_owner_line.items())
+        },
+        "node_to_segment": dict(sorted(node_to_seg.items())),
+        "sem_dep_internal_witnesses": internal_sem_witnesses,
         "segments": [
             {
                 "seg_id": s.seg_id,
